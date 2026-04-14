@@ -208,11 +208,18 @@ app.post('/api/upload', upload.single('excel'), (req, res) => {
 
     if (shWip) {
       const wipRows = XLSX.utils.sheet_to_json(shWip, { header:1, defval:null });
+      // The pivot table has SA names in col0 and counts in col1
+      // Grand Total row gives us Al-Rai total — use the FIRST Grand Total found
+      let foundGrandTotal = false;
       wipRows.forEach(r => {
         if (!r||!r[0]) return;
         const lbl = typeof r[0]==='string' ? r[0].trim() : '';
-        if (lbl==='Grand Total') { alraiWip=r[1]||0; return; }
-        if (lbl && lbl!=='Row Labels' && typeof r[1]==='number') {
+        if (lbl==='Grand Total' && !foundGrandTotal) {
+          alraiWip = r[1]||0;
+          foundGrandTotal = true;
+          return;
+        }
+        if (!foundGrandTotal && lbl && lbl!=='Row Labels' && typeof r[1]==='number' && r[1]>0) {
           wipData.push({ name:lbl, wip:r[1]||0, branch:'Al-Rai' });
           saData.forEach(sa => {
             if (sa.branch==='Al-Rai' && sa.name.substring(0,6)===lbl.substring(0,6)) sa.wip=r[1]||0;
@@ -220,10 +227,17 @@ app.post('/api/upload', upload.single('excel'), (req, res) => {
         }
       });
     }
+    // Jahra & Ahmadi: count rows where col0 is a positive number (WIP No)
     const shJahra = wb.Sheets['Jahra WIP'];
-    if (shJahra) jahraWip = XLSX.utils.sheet_to_json(shJahra,{header:1}).filter(r=>r&&typeof r[0]==='number').length;
+    if (shJahra) {
+      const jr = XLSX.utils.sheet_to_json(shJahra, { header:1, defval:null });
+      jahraWip = jr.filter(r => r && typeof r[0]==='number' && r[0]>0).length;
+    }
     const shAhmadi = wb.Sheets['Ahmadi WIP'];
-    if (shAhmadi) ahmadiWip = XLSX.utils.sheet_to_json(shAhmadi,{header:1}).filter(r=>r&&typeof r[0]==='number').length;
+    if (shAhmadi) {
+      const ar = XLSX.utils.sheet_to_json(shAhmadi, { header:1, defval:null });
+      ahmadiWip = ar.filter(r => r && typeof r[0]==='number' && r[0]>0).length;
+    }
 
     // ── 5. All Wips ──
     const shAllWips = wb.Sheets['All Wips'];
