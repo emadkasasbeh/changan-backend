@@ -4,7 +4,7 @@ const XLSX = require('xlsx');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-
+const partsRoutes = require('./partsRoutes');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ADMIN_USER = process.env.ADMIN_USER || 'emad';
@@ -18,6 +18,7 @@ if (fs.existsSync(DATA_FILE)) {
 
 app.use(cors());
 app.use(express.json());
+app.use('/api', partsRoutes);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50*1024*1024 } });
 
 app.post('/api/login', (req, res) => {
