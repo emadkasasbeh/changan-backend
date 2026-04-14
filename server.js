@@ -48,24 +48,35 @@ app.post('/api/upload', upload.single('excel'), (req, res) => {
     const debugInfo = { sheets: wb.SheetNames, saRows:[] };
 
     // ── 1. Day Results (2) ──
+    // Layout (0-indexed): col6=label, col7=AlRai, col8=PDI, col9=Jahra, col10=Ahmadi, col11=Total
+    // Throughput: col6=label, col7=WS, col8=QS, col9=PDI, col10=Jahra, col11=Ahmadi, col12=Total
+    // Expected MTD: row1, col21
     const shDay = wb.Sheets['Day Results (2)'];
     const dayRows = shDay ? XLSX.utils.sheet_to_json(shDay, { header:1, defval:null }) : [];
+
     let budget=0, actual=0, mtdPct=0, runRate=0, runAmt=0;
     let branches={alrai:0,pdi:0,jahra:0,ahmadi:0};
     let budgets={alrai:0,pdi:0,jahra:0,ahmadi:0};
     let throughput={ws:0,qs:0,pdi:0,jahra:0,ahmadi:0,total:0};
     let expectedMTD=0;
 
-    if (shDay && shDay['V2']) expectedMTD = shDay['V2'].v || 0;
-
-    // Find label column dynamically
-    let lc = 0;
-    for (const r of dayRows) {
-      for (let j=0; j<(r||[]).length; j++) {
-        if (r[j]==='Budget') { lc=j; break; }
-      }
-      if (lc>0) break;
+    // Get expected MTD from row index 1, col 21
+    if (dayRows[1] && typeof dayRows[1][21] === 'number') {
+      expectedMTD = dayRows[1][21];
     }
+    // Fallback: try V2 cell
+    if (!expectedMTD && shDay && shDay['V2']) expectedMTD = shDay['V2'].v || 0;
+
+    // Find label column by scanning for 'Budget'
+    let lc = 6; // default known position
+    for (const r of dayRows) {
+      if (!r) continue;
+      for (let j=0; j<r.length; j++) {
+        if (r[j] === 'Budget') { lc = j; break; }
+      }
+      if (lc !== 6 || dayRows.some(r => r && r[6] === 'Budget')) break;
+    }
+    debugInfo.dayLabelCol = lc;
 
     dayRows.forEach(r => {
       if (!r || !r[lc]) return;
@@ -75,86 +86,78 @@ app.post('/api/upload', upload.single('excel'), (req, res) => {
       if (lbl==='MTD %')         { mtdPct=r[lc+5]||0; }
       if (lbl==='Run Rate')      { runRate=r[lc+5]||0; }
       if (lbl==='Run Amount KD') { runAmt=r[lc+5]||0; }
+      // Throughput: WS, QS, PDI, Jahra, Ahmadi, Total
       if (lbl==='Cars Served')   { throughput={ws:r[lc+1]||0,qs:r[lc+2]||0,pdi:r[lc+3]||0,jahra:r[lc+4]||0,ahmadi:r[lc+5]||0,total:r[lc+6]||0}; }
     });
 
+    debugInfo.actual = actual;
+    debugInfo.budget = budget;
+    debugInfo.throughput = throughput;
+    debugInfo.expectedMTD = expectedMTD;
+
     // ── 2. SA Sheet ──
-    // Known fixed columns from Excel analysis:
-    // col5=Name, col6=ROs, col7=RO/Day, col8=PendingWIP, col9=LaborOnly
-    // col10=TotalLabor, col11=Parts, col14=Budget, col15=MTD%
+    // Layout: col5=Name, col6=ROs, col7=RO/Day, col8=PendingWIP,
+    //         col9=LaborOnly, col10=TotalLabor, col11=Parts,
+    //         col14=Budget, col15=MTD%
     const shSA = wb.Sheets['SA'];
     const saRows = shSA ? XLSX.utils.sheet_to_json(shSA, { header:1, defval:null }) : [];
     const saData = [];
     const saBranchMap = { 'Al-Rai':[], 'Jahra':[], 'Ahmadi':[] };
     let curBranch = 'Al-Rai';
 
-    // Find name column by looking for 'Al-Rai Branch' or branch headers
-    // These always appear before SA data rows
-    // Use the column where branch names appear
-    let nameCol = 5; // default from analysis
-
-    // Verify by scanning for 'Al-Rai Branch'
+    // Find nameCol: look for the column containing 'Al-Rai Branch'
+    let nameCol = 5; // known from Excel analysis
     for (const r of saRows) {
       if (!r) continue;
       for (let j=0; j<r.length; j++) {
-        if (typeof r[j]==='string' && r[j].includes('Branch')) {
+        if (typeof r[j]==='string' && r[j].includes('Al-Rai Branch')) {
           nameCol = j; break;
         }
       }
-      if (nameCol !== 5) break;
     }
-
-    const rosCol    = nameCol + 1;
-    const wipCol    = nameCol + 3;
-    const laborCol  = nameCol + 5;
-    const partsCol  = nameCol + 6;
-    const budgetCol = nameCol + 9;
-    const pctCol    = nameCol + 10;
-
     debugInfo.saNameCol = nameCol;
-    debugInfo.rosCol = rosCol;
-    debugInfo.laborCol = laborCol;
+    debugInfo.saColsUsed = {
+      name:nameCol, ros:nameCol+1, wip:nameCol+3,
+      labor:nameCol+5, parts:nameCol+6, budget:nameCol+9, pct:nameCol+10
+    };
 
     saRows.forEach((r, i) => {
       if (!r || r[nameCol]===null || r[nameCol]===undefined) return;
-      const nameVal = r[nameCol];
-      const s = typeof nameVal==='string' ? nameVal.trim() : '';
+      const s = typeof r[nameCol]==='string' ? r[nameCol].trim() : '';
       if (!s) return;
 
-      // Branch header
-      if (s.toLowerCase().includes('branch')) {
-        if (s.toLowerCase().includes('jahra'))  curBranch = 'Jahra';
-        else if (s.toLowerCase().includes('ahmadi')) curBranch = 'Ahmadi';
-        else curBranch = 'Al-Rai';
+      // Branch header detection
+      if (s.includes('Branch')) {
+        if (s.includes('Jahra'))       curBranch = 'Jahra';
+        else if (s.includes('Ahmadi')) curBranch = 'Ahmadi';
+        else                           curBranch = 'Al-Rai';
         return;
       }
 
-      // Skip header rows
+      // Skip header and total rows
       if (s.toLowerCase().startsWith('sa name')) return;
-
-      // Skip Grand Total or summary rows
       if (s.toLowerCase().includes('grand total') || s.toLowerCase().includes('total')) return;
 
-      // Must have ROs as positive number
-      const ros = r[rosCol];
+      // Valid SA row: ROs must be a positive number
+      const ros = r[nameCol+1];
       if (typeof ros !== 'number' || ros <= 0) return;
 
-      // Must have valid budget (real SA row)
-      const budgetVal = r[budgetCol];
+      // Budget must be a number (filters out non-SA rows)
+      const budgetVal = r[nameCol+9];
       if (!budgetVal || typeof budgetVal !== 'number') return;
 
-      const pctRaw = r[pctCol];
+      const pctRaw = r[nameCol+10];
       const pct = typeof pctRaw==='number' ? parseFloat((pctRaw*100).toFixed(1)) : 0;
 
       const sa = {
         name:   s,
         branch: curBranch,
         ros,
-        labor:  r[laborCol]  || 0,
-        parts:  r[partsCol]  || 0,
+        labor:  r[nameCol+5] || 0,
+        parts:  r[nameCol+6] || 0,
         budget: budgetVal,
         pct,
-        wip:    r[wipCol] || 0
+        wip:    r[nameCol+3] || 0
       };
       saData.push(sa);
       if (saBranchMap[curBranch]) saBranchMap[curBranch].push(s);
@@ -211,7 +214,9 @@ app.post('/api/upload', upload.single('excel'), (req, res) => {
         if (lbl==='Grand Total') { alraiWip=r[1]||0; return; }
         if (lbl && lbl!=='Row Labels' && typeof r[1]==='number') {
           wipData.push({ name:lbl, wip:r[1]||0, branch:'Al-Rai' });
-          saData.forEach(sa => { if (sa.branch==='Al-Rai' && sa.name.substring(0,6)===lbl.substring(0,6)) sa.wip=r[1]||0; });
+          saData.forEach(sa => {
+            if (sa.branch==='Al-Rai' && sa.name.substring(0,6)===lbl.substring(0,6)) sa.wip=r[1]||0;
+          });
         }
       });
     }
@@ -238,16 +243,15 @@ app.post('/api/upload', upload.single('excel'), (req, res) => {
 
     latestData = {
       updatedAt: new Date().toISOString(),
-      expectedMTD,
-      mtd: { actual, budget, mtdPct, runRate, runAmt, branches, budgets },
+      expectedMTD, mtd:{actual,budget,mtdPct,runRate,runAmt,branches,budgets},
       throughput, saData, saBranchMap, prod, techsByBranch,
-      wipSummary: { alrai:alraiWip, jahra:jahraWip, ahmadi:ahmadiWip, total:alraiWip+jahraWip+ahmadiWip },
+      wipSummary:{alrai:alraiWip,jahra:jahraWip,ahmadi:ahmadiWip,total:alraiWip+jahraWip+ahmadiWip},
       wipData, allWips, debugInfo
     };
 
     fs.writeFileSync(DATA_FILE, JSON.stringify(latestData));
-    console.log(`✅ SAs=${saData.length} WIPs=${allWips.length} Actual=${actual}`);
-    res.json({ success:true, message:'Updated!', saCount:saData.length, actual, updatedAt:latestData.updatedAt });
+    console.log(`✅ SAs=${saData.length} actual=${actual} throughput_total=${throughput.total}`);
+    res.json({ success:true, message:'Updated!', saCount:saData.length, actual, throughputTotal:throughput.total });
 
   } catch(err) {
     console.error('Error:', err);
